@@ -73,4 +73,4 @@ State wird gespeichert in: `~/.dokubibliothek_state.json`
 
 ## Lizenz
 
-MIT License - Siehe [LICENSE](LICENSE)
+GPL v3 - Siehe [LICENSE](LICENSE)
