@@ -73,4 +73,4 @@ State wird gespeichert in: `~/.dokubibliothek_state.json`
 
 ## Lizenz
 
-Proprietär - Lukas Geiger
+MIT License - Siehe [LICENSE](LICENSE)
