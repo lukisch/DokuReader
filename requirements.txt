@@ -1,0 +1,29 @@
+# DokuReader - Requirements
+# Core Dependencies (erforderlich für Basis-Funktionalität)
+Pillow>=10.0.0
+
+# PDF-Handling (mindestens eine empfohlen)
+pypdf>=3.0.0
+# Alternativ: PyPDF2>=3.0.0
+
+# Optional - PDF-Vorschau (empfohlen)
+pdf2image>=1.16.0
+# ODER
+PyMuPDF>=1.23.0
+
+# Optional - Office-Vorschau
+python-docx>=1.0.0
+odfpy>=1.4.1
+
+# Optional - Konvertierung zu PDF
+reportlab>=4.0.0
+
+# Optional - Drag & Drop
+tkinterdnd2>=0.3.0
+
+# Optional - Windows Word COM (nur Windows)
+# pywin32>=306
+
+# System-Abhängigkeiten (nicht via pip):
+# - LibreOffice (für Office → PDF Konvertierung)
+# - Poppler (für pdf2image)
