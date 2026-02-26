@@ -48,6 +48,16 @@ desktop.ini
 releases/*.exe
 releases/*.zip
 
+# Secrets
+.env
+
+# Planung & Interne Doku
+PLAN.txt
+
+# Private / Archive
+_archive/
+_private/
+
 # Project-specific
 AUFGABEN.txt
 DokuReader_konvert.txt
