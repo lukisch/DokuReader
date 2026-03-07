@@ -1,0 +1,26 @@
+{
+  "Größe": {
+    "de": "Größe",
+    "en": "Size"
+  },
+  "Hinzufügen": {
+    "de": "Hinzufügen",
+    "en": "Add"
+  },
+  "Keine Vorschau verfügbar": {
+    "de": "Keine Vorschau verfügbar",
+    "en": "No preview available"
+  },
+  "Löschen": {
+    "de": "Löschen",
+    "en": "Delete"
+  },
+  "Textdatei": {
+    "de": "Textdatei",
+    "en": "Text File"
+  },
+  "Vorschau-Fehler": {
+    "de": "Vorschau-Fehler",
+    "en": "Preview Error"
+  }
+}
