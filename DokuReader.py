@@ -96,6 +96,21 @@ except Exception:
     TKDND_AVAILABLE = False
 
 
+def read_text_with_fallback(path, max_chars=None):
+    """Liest eine Textdatei mit Encoding-Fallback: UTF-8 -> Latin-1 -> Hexdump."""
+    for enc in ["utf-8", "latin-1"]:
+        try:
+            with open(path, "r", encoding=enc, errors="replace") as f:
+                return f.read(max_chars) if max_chars else f.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+    try:
+        with open(path, "rb") as f:
+            return f.read(256).hex(" ")
+    except OSError:
+        return None
+
+
 APP_NAME = "Dokumentenbibliothek"
 STATE_FILE = str(Path.home() / ".dokubibliothek_state.json")
 
@@ -226,7 +241,17 @@ class State:
 
 
 class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
+    """
+    Hauptanwendung der Dokumentenbibliothek.
+
+    Verwaltet Themen und Dokumente über eine dreispaltige GUI:
+    - Links: Themenliste mit Verwaltungsbuttons
+    - Mitte: Dokumentenliste (sortierbar) mit Drag-&-Drop-Unterstützung
+    - Rechts: Vorschau und Sammel-PDF-Export
+    """
+
     def __init__(self):
+        """Initialisiert die App: Fenster konfigurieren, State laden, GUI aufbauen."""
         super().__init__()
         self.title(APP_NAME)
         self.geometry("1200x700")
@@ -243,6 +268,7 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _build_ui(self):
+        """Erstellt alle GUI-Widgets (PanedWindow, Themenliste, Dokumententree, Vorschau, Export)."""
         paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True)
 
@@ -263,14 +289,31 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
         center = ttk.Frame(paned)
         paned.add(center, weight=3)
         ttk.Label(center, text="Dokumente im Thema").pack(anchor="w", padx=8, pady=(8, 2))
+
+        # Suchleiste
+        search_frame = ttk.Frame(center)
+        search_frame.pack(fill=tk.X, padx=8, pady=(0, 4))
+        ttk.Label(search_frame, text="Suche:").pack(side=tk.LEFT, padx=(0, 4))
+        self._search_var = tk.StringVar()
+        self._search_var.trace_add("write", lambda *_: self._reload_docs())
+        search_entry = ttk.Entry(search_frame, textvariable=self._search_var)
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(search_frame, text="✕", width=2,
+                   command=lambda: self._search_var.set("")).pack(side=tk.LEFT, padx=(4, 0))
+
         self.doc_tree = ttk.Treeview(center, columns=("typ", "größe"), show="tree headings", selectmode="browse")
-        self.doc_tree.heading("#0", text="Name", anchor="w")
-        self.doc_tree.heading("typ", text="Typ")
-        self.doc_tree.heading("größe", text="Größe")
+        self.doc_tree.heading("#0", text="Name", anchor="w",
+                              command=lambda: self._sort_docs("name"))
+        self.doc_tree.heading("typ", text="Typ",
+                              command=lambda: self._sort_docs("typ"))
+        self.doc_tree.heading("größe", text="Größe",
+                              command=lambda: self._sort_docs("größe"))
         self.doc_tree.column("#0", width=550, anchor="w")
         self.doc_tree.column("typ", width=100, anchor="w")
         self.doc_tree.column("größe", width=100, anchor="e")
         self.doc_tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 6))
+        self._sort_key = "name"
+        self._sort_reverse = False
 
         # Tag für gelesene Einträge: grün + fett
         self.doc_tree.tag_configure("read", foreground="#08660c", font=("TkDefaultFont", 9, "bold"))
@@ -316,15 +359,18 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
 
     # Themen-Handling
     def _reload_topics(self):
+        """Aktualisiert die Themenliste aus dem State (alphabetisch sortiert)."""
         self.topic_list.delete(0, tk.END)
         for t in sorted(self.state_model.topics.keys(), key=str.lower):
             self.topic_list.insert(tk.END, t)
 
     def _select_topic(self, topic: str):
+        """Setzt das aktuelle Thema und lädt die zugehörigen Dokumente."""
         self.state_model.current_topic = topic
         self._reload_docs()
 
     def on_topic_select(self, _=None):
+        """Callback: Thema in der Listbox ausgewählt; lädt zugehörige Dokumente und speichert State."""
         sel = self.topic_list.curselection()
         if not sel:
             return
@@ -333,6 +379,7 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
         self.state_model.save()
 
     def add_topic(self):
+        """Dialog zum Anlegen eines neuen Themas; prüft auf leeren Namen und Duplikate."""
         name = simpledialog.askstring("Neues Thema", "Name:")
         if not name:
             return
@@ -348,6 +395,7 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
         self._select_topic(name)
 
     def rename_topic(self):
+        """Dialog zum Umbenennen des aktuell gewählten Themas; prüft auf Duplikate."""
         sel = self.topic_list.curselection()
         if not sel:
             return
@@ -369,6 +417,7 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
         self._select_topic(new)
 
     def delete_topic(self):
+        """Löscht das aktuell gewählte Thema nach Bestätigung (Originaldateien bleiben erhalten)."""
         sel = self.topic_list.curselection()
         if not sel:
             return
@@ -383,12 +432,45 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
             self.clear_preview()
 
     # Dokumente-Handling
+    def _sort_docs(self, key):
+        """Sortiert Dokumente nach Spalte. Erneuter Klick kehrt Reihenfolge um."""
+        if self._sort_key == key:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_key = key
+            self._sort_reverse = False
+        self._reload_docs()
+
     def _reload_docs(self):
+        """Füllt den Dokument-Treeview neu (aktuelle Sortierung und Suchfilter werden berücksichtigt)."""
         self.doc_tree.delete(*self.doc_tree.get_children())
         topic = self.state_model.current_topic
         if not topic:
             return
-        for d in self.state_model.list_docs(topic):
+        docs = self.state_model.list_docs(topic)
+        # Suchfilter anwenden (case-insensitiv, nach Dateiname)
+        search = getattr(self, "_search_var", None)
+        if search:
+            query = search.get().strip().lower()
+            if query:
+                docs = [d for d in docs if query in os.path.basename(d["path"]).lower()]
+        # Sortierung anwenden
+        sort_key = getattr(self, "_sort_key", "name")
+        sort_reverse = getattr(self, "_sort_reverse", False)
+        if sort_key == "name":
+            docs.sort(key=lambda d: os.path.basename(d["path"]).lower(),
+                      reverse=sort_reverse)
+        elif sort_key == "typ":
+            docs.sort(key=lambda d: Path(d["path"]).suffix.lower(),
+                      reverse=sort_reverse)
+        elif sort_key == "größe":
+            def _size(d):
+                try:
+                    return os.path.getsize(d["path"])
+                except OSError:
+                    return 0
+            docs.sort(key=_size, reverse=sort_reverse)
+        for d in docs:
             path = d["path"]
             name = os.path.basename(path)
             ext = Path(path).suffix.lower()
@@ -405,6 +487,7 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
         self.clear_preview()
 
     def add_files_dialog(self):
+        """Öffnet einen Dateidialog und fügt ausgewählte Dateien dem aktuellen Thema hinzu."""
         topic = self.state_model.current_topic
         if not topic:
             messagebox.showinfo("Hinweis", "Bitte zuerst ein Thema auswählen.")
@@ -422,6 +505,7 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
             messagebox.showinfo("Hinweis", "Keine neuen unterstützten Dateien hinzugefügt.")
 
     def on_drop(self, event):
+        """Callback für Drag-&-Drop: Fügt gedropte Dateien dem aktuellen Thema hinzu."""
         topic = self.state_model.current_topic
         if not topic:
             return
@@ -434,6 +518,14 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
 
     @staticmethod
     def _split_dnd_paths(data: str):
+        """Parst den Drag-&-Drop-Datenpfad (unterstützt geschweifte Klammern für Leerzeichen).
+
+        Args:
+            data: Rohstring aus dem Drop-Event (z.B. '{C:\\Pfad mit Leerzeichen\\file.pdf} /home/x.pdf')
+
+        Returns:
+            Liste von bereinigten Dateipfaden
+        """
         # Formate wie {C:\Pfad mit Leerzeichen\file.pdf} /home/user/x.pdf ...
         res = []
         cur = []
@@ -457,12 +549,14 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
         return [p.strip() for p in res if p.strip()]
 
     def on_doc_right_click(self, event):
+        """Zeigt das Kontextmenü beim Rechtsklick auf einen Dokumenteintrag."""
         iid = self.doc_tree.identify_row(event.y)
         if iid:
             self.doc_tree.selection_set(iid)
             self.doc_menu.tk_popup(event.x_root, event.y_root)
 
     def on_doc_double_click(self, _=None):
+        """Öffnet die ausgewählte Datei im Standard-Programm des Betriebssystems."""
         sel = self.doc_tree.selection()
         if not sel:
             return
@@ -478,6 +572,11 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
             messagebox.showerror("Fehler", f"Konnte Datei nicht öffnen:\n{e}")
 
     def set_selected_read(self, is_read: bool):
+        """Setzt den Gelesen-Status des ausgewählten Dokuments und aktualisiert die Ansicht.
+
+        Args:
+            is_read: True = gelesen markieren, False = Markierung entfernen
+        """
         topic = self.state_model.current_topic
         sel = self.doc_tree.selection()
         if not topic or not sel:
@@ -488,6 +587,7 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
         self._reload_docs()
 
     def remove_selected_doc(self):
+        """Entfernt das ausgewählte Dokument aus der Bibliothek nach Bestätigung (Datei bleibt erhalten)."""
         topic = self.state_model.current_topic
         sel = self.doc_tree.selection()
         if not topic or not sel:
@@ -499,6 +599,7 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
             self._reload_docs()
 
     def on_doc_select(self, _=None):
+        """Callback: Dokument im Treeview ausgewählt; zeigt Vorschau oder löscht sie."""
         sel = self.doc_tree.selection()
         if not sel:
             self.clear_preview()
@@ -507,11 +608,17 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
 
     # Vorschau
     def clear_preview(self):
+        """Leert Canvas und Textfeld der Vorschau und zeigt Platzhaltertext."""
         self.preview.delete("all")
         self.preview_text.delete("1.0", tk.END)
         self.preview.create_text(10, 10, anchor="nw", text="Keine Vorschau", fill="#666")
 
     def show_preview(self, path: str):
+        """Zeigt eine Vorschau der Datei (Bild, Text, PDF, DOCX, ODT) je nach Dateityp.
+
+        Args:
+            path: Absoluter Pfad zur anzuzeigenden Datei
+        """
         self.preview.delete("all")
         self.preview_text.delete("1.0", tk.END)
         ext = Path(path).suffix.lower()
@@ -525,17 +632,7 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
                 self.preview.create_image(10, 10, anchor="nw", image=self._preview_img)
                 self.preview_text.insert("1.0", f"Bild: {img.width}x{img.height}px\n{path}")
             elif ext in TXT_EXTS:
-                content = None
-                for enc in ["utf-8", "latin-1"]:
-                    try:
-                        with open(path, "r", encoding=enc, errors="replace") as f:
-                            content = f.read(TXT_PREVIEW_CHARS)
-                        break
-                    except (OSError, UnicodeDecodeError):
-                        continue
-                if content is None:
-                    with open(path, "rb") as f:
-                        content = f.read(256).hex(" ")
+                content = read_text_with_fallback(path, max_chars=TXT_PREVIEW_CHARS)
                 self.preview.create_text(10, 10, anchor="nw", text="Textdatei", fill="#666")
                 self.preview_text.insert("1.0", content if content else "(Leer)")
             elif ext in PDF_EXTS and (PDF2IMG_AVAILABLE or PYMUPDF_AVAILABLE) and PIL_AVAILABLE:
@@ -545,7 +642,7 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
                         pages = convert_from_path(path, first_page=1, last_page=1)
                         if pages:
                             img = pages[0]
-                    except Exception:
+                    except (OSError, ValueError, RuntimeError):
                         img = None
                 if img is None and PYMUPDF_AVAILABLE:
                     try:
@@ -554,7 +651,7 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
                             page = doc[0]
                             pix = page.get_pixmap()
                             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    except Exception:
+                    except (OSError, ValueError, RuntimeError):
                         img = None
                 if img is not None:
                     cw = self.preview.winfo_width() or 600
@@ -569,7 +666,7 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
                     text = "\n".join(p.text for p in doc.paragraphs[:OFFICE_PREVIEW_PARAGRAPHS])
                     self.preview.create_text(10, 10, anchor="nw", text="DOCX-Vorschau", fill="#666")
                     self.preview_text.insert("1.0", text if text.strip() else "(Kein Textinhalt erkannt)")
-                except Exception as e:
+                except (OSError, ValueError, KeyError) as e:
                     self.preview_text.insert("1.0", f"(Keine DOCX-Vorschau möglich)\n{e}")
             elif ext == ".odt" and ODFPREVIEW_AVAILABLE:
                 try:
@@ -578,22 +675,23 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
                     text_content = "\n".join(teletype.extractText(p) for p in paras[:OFFICE_PREVIEW_PARAGRAPHS])
                     self.preview.create_text(10, 10, anchor="nw", text="ODT-Vorschau", fill="#666")
                     self.preview_text.insert("1.0", text_content if text_content.strip() else "(Kein Textinhalt erkannt)")
-                except Exception as e:
+                except (OSError, ValueError, KeyError) as e:
                     self.preview_text.insert("1.0", f"(Keine ODT-Vorschau möglich)\n{e}")
             else:
                 # Generische Metadaten
                 try:
                     size = human_size(os.path.getsize(path))
-                except Exception:
+                except OSError:
                     size = "?"
                 self.preview.create_text(10, 10, anchor="nw", text="Keine Vorschau verfügbar", fill="#666")
                 self.preview_text.insert("1.0", f"Datei: {os.path.basename(path)}\nTyp: {ext}\nGröße: {size}\nPfad: {path}")
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             self.preview.create_text(10, 10, anchor="nw", text="Vorschau-Fehler", fill="#666")
             self.preview_text.insert("1.0", f"Fehler: {e}")
 
     # Export Sammel-PDF
     def create_collection_pdf(self):
+        """Startet den Sammel-PDF-Export als Hintergrund-Thread (gelesene/ungelesene/alle)."""
         topic = self.state_model.current_topic
         if not topic:
             messagebox.showinfo("Hinweis", "Bitte zuerst ein Thema auswählen.")
@@ -602,6 +700,12 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
         threading.Thread(target=self._create_collection_pdf_worker, args=(topic, filter_mode), daemon=True).start()
 
     def _create_collection_pdf_worker(self, topic: str, filter_mode: str):
+        """Hintergrund-Worker: Konvertiert Dokumente in PDF und merged sie zu einer Datei.
+
+        Args:
+            topic: Name des Themas
+            filter_mode: 'alle', 'gelesene' oder 'ungelesene'
+        """
         self._set_busy(True)
         try:
             docs = self.state_model.list_docs(topic)
@@ -669,16 +773,35 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
 
     # Busy/Status
     def _set_busy(self, busy: bool):
+        """Setzt den Warte-Cursor (thread-sicher via after()).
+
+        Args:
+            busy: True = Warte-Cursor, False = normaler Cursor
+        """
         def apply():
             self.config(cursor="watch" if busy else "")
             self.update_idletasks()
         self.after(0, apply)
 
     def status_info(self, msg: str):
+        """Zeigt eine Info-Meldung thread-sicher im Hauptthread an.
+
+        Args:
+            msg: Anzuzeigende Nachricht
+        """
         self.after(0, lambda: messagebox.showinfo("Info", msg))
 
     # Konvertierungen
     def _txt_to_pdf(self, path: str, tmpdir: Path) -> str | None:
+        """Konvertiert eine Textdatei in eine PDF via ReportLab.
+
+        Args:
+            path: Pfad zur Quelldatei (.txt)
+            tmpdir: Temporäres Verzeichnis für die Ausgabe-PDF
+
+        Returns:
+            Pfad zur erstellten PDF oder None bei Fehler/fehlender Bibliothek
+        """
         if not REPORTLAB_AVAILABLE:
             return None
         out = tmpdir / (Path(path).stem + "_txt.pdf")
@@ -705,15 +828,24 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
             c.showPage()
             c.save()
             return str(out)
-        except Exception:
+        except (OSError, ValueError, RuntimeError):
             try:
                 if out.exists():
                     out.unlink()
-            except Exception:
+            except OSError:
                 pass
             return None
 
     def _image_to_pdf(self, path: str, tmpdir: Path) -> str | None:
+        """Konvertiert ein Bild in eine PDF (ReportLab bevorzugt, Pillow als Fallback).
+
+        Args:
+            path: Pfad zum Quellbild
+            tmpdir: Temporäres Verzeichnis für die Ausgabe-PDF
+
+        Returns:
+            Pfad zur erstellten PDF oder None bei Fehler
+        """
         out = tmpdir / (Path(path).stem + "_img.pdf")
         # Bevorzugt ReportLab (saubere Skalierung)
         if REPORTLAB_AVAILABLE:
@@ -733,7 +865,7 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
                 c.showPage()
                 c.save()
                 return str(out)
-            except Exception:
+            except (OSError, ValueError, RuntimeError):
                 pass
         # Fallback: Pillow direkt nach PDF
         if PIL_AVAILABLE:
@@ -741,11 +873,20 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
                 img = Image.open(path).convert("RGB")
                 img.save(out, "PDF", resolution=150.0)
                 return str(out)
-            except Exception:
+            except (OSError, ValueError):
                 pass
         return None
 
     def _office_to_pdf(self, path: str, tmpdir: Path) -> str | None:
+        """Konvertiert ein Office-Dokument in PDF (LibreOffice headless oder Word COM).
+
+        Args:
+            path: Pfad zum Office-Dokument (.doc, .docx, .odt, .rtf)
+            tmpdir: Temporäres Verzeichnis für die Ausgabe-PDF
+
+        Returns:
+            Pfad zur erstellten PDF oder None bei Fehler/fehlenden Programmen
+        """
         # 1) LibreOffice headless (soffice/libreoffice)
         for cand in ["soffice", "libreoffice"]:
             if shutil.which(cand):
@@ -757,7 +898,7 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
                     out = tmpdir / (Path(path).stem + ".pdf")
                     if out.exists():
                         return str(out)
-                except Exception:
+                except (OSError, subprocess.SubprocessError):
                     pass
         # 2) Microsoft Word COM (nur Windows; öffnet DOC/DOCX/RTF; ODT oft nicht)
         if platform.system() == "Windows":
@@ -773,11 +914,20 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
                 word.Quit()
                 if os.path.exists(out_path):
                     return out_path
-            except Exception:
+            except (OSError, ImportError, AttributeError):
                 pass
         return None
 
     def _merge_pdfs(self, pdf_paths: list[str], out_path: Path) -> bool:
+        """Merged mehrere PDFs zu einer Ausgabedatei via pypdf oder PyPDF2.
+
+        Args:
+            pdf_paths: Liste von Pfaden zu den Einzel-PDFs
+            out_path: Pfad für die zusammengeführte PDF
+
+        Returns:
+            True bei Erfolg, False bei fehlendem PdfMerger oder Fehler
+        """
         if not PdfMerger:
             return False
         try:
@@ -785,20 +935,21 @@ class App(tk.Tk if not TKDND_AVAILABLE else tkdnd.Tk):
             for p in pdf_paths:
                 try:
                     merger.append(p)
-                except Exception:
+                except (OSError, ValueError) as e:
                     # Ignoriere defekte Einzel-PDFs
                     continue
             with open(out_path, "wb") as f:
                 merger.write(f)
             try:
                 merger.close()
-            except Exception:
+            except (OSError, ValueError):
                 pass
             return True
-        except Exception:
+        except (OSError, ValueError, RuntimeError):
             return False
 
     def on_close(self):
+        """Callback beim Schließen des Fensters: State speichern und App beenden."""
         self.state_model.save()
         self.destroy()
 
